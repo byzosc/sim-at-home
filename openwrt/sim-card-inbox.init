@@ -1,0 +1,64 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+START=96
+STOP=9
+
+PROG=/usr/bin/python3
+SCRIPT=/usr/libexec/sim-card-forwarding/inbox_server.py
+DATABASE=/overlay/sim-card-forwarding/inbox-view/inbox.sqlite3
+ALLOWLIST=/etc/sim-card-inbox/users.allow
+SERVICE_USER=sim-inbox
+SERVICE_GROUP=sim-inbox
+
+start_service() {
+	[ -x "$PROG" ] || {
+		logger -t sim-card-inbox "python runtime is unavailable"
+		return 1
+	}
+	[ -f "$SCRIPT" ] || {
+		logger -t sim-card-inbox "inbox program is unavailable"
+		return 1
+	}
+	[ -f "$DATABASE" ] || {
+		logger -t sim-card-inbox "inbox data is unavailable"
+		return 1
+	}
+	[ -f "$ALLOWLIST" ] || {
+		logger -t sim-card-inbox "inbox access policy is unavailable"
+		return 1
+	}
+	service_uid=$(id -u "$SERVICE_USER" 2>/dev/null) || {
+		logger -t sim-card-inbox "inbox service account is unavailable"
+		return 1
+	}
+	[ "$service_uid" -gt 0 ] 2>/dev/null || {
+		logger -t sim-card-inbox "inbox service account must not be root"
+		return 1
+	}
+	service_gid=$(
+		awk -F: -v name="$SERVICE_GROUP" \
+			'$1 == name { print $3; exit }' /etc/group 2>/dev/null
+	)
+	[ -n "$service_gid" ] || {
+		logger -t sim-card-inbox "inbox service group is unavailable"
+		return 1
+	}
+	[ "$service_gid" -gt 0 ] 2>/dev/null || {
+		logger -t sim-card-inbox "inbox service group must not be root"
+		return 1
+	}
+
+	procd_open_instance
+	procd_set_param command "$PROG" "$SCRIPT"
+	procd_append_param command --database "$DATABASE"
+	procd_append_param command --allowlist "$ALLOWLIST"
+	procd_append_param command --bind 127.0.0.1
+	procd_append_param command --port 8787
+	procd_set_param user "$SERVICE_USER"
+	procd_set_param group "$SERVICE_GROUP"
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}

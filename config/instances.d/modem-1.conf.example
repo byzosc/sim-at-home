@@ -1,0 +1,39 @@
+[device]
+id=modem-1
+label=Personal SIM
+base_url=http://192.168.0.1
+interface=eth2
+expected_mac=00:00:00:00:00:00
+expected_usb_path=2-1
+expected_usb_id=19d2:1706
+# keep(默认)= 不管棒子的数据连接;off = 转发器每轮确认「手动拨号、不连数据」,不对就改回来。
+# 套餐没有流量、只用来收短信时设 off——棒子断电恢复出厂设置也会在下一轮被纠正。
+cellular_data=off
+
+[notifications]
+# none / bark / telegram / both (Bark + Telegram) / ntfy / bark_ntfy
+mode=none
+# summary: only announce a new SMS; full: explicitly include number and body.
+content=summary
+bark_server=https://api.day.app
+bark_key=
+telegram_bot_token=
+telegram_chat_id=
+ntfy_server=https://ntfy.example.com
+ntfy_topic=
+ntfy_token=
+
+[runtime]
+# baseline: 首次运行只记录设备中已有短信，不推送旧短信
+# notify: 首次运行也推送设备中已有短信
+first_run=baseline
+include_sent=false
+# 0 means keep messages until an explicit retention policy is configured.
+retention_days=0
+# MF833U1 NV storage is 100 messages. Automatic device-side deletion is
+# disabled when the threshold is 0. Recommended production policy: at 90,
+# delete the exact oldest 30 only after both SQLite copies and notification
+# state confirm that every selected payload is safe.
+device_sms_capacity=100
+device_cleanup_threshold=0
+device_cleanup_batch=30

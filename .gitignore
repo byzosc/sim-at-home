@@ -1,0 +1,8 @@
+config/instances.d/*.conf
+!config/instances.d/*.conf.example
+state/
+messages/
+diagnostics/
+r3s-external-monitor-*.log
+__pycache__/
+*.pyc
