@@ -1,6 +1,6 @@
 <div align="center">
 
-# sim-at-home
+# SIM at Home
 
 [English](README.md) · **中文**
 
