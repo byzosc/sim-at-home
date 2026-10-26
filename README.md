@@ -212,4 +212,4 @@ python3 -m unittest discover -s tests
 
 Implementation reference: [czwstc/ZTE-MF833U1-SMSForwarder](https://github.com/czwstc/ZTE-MF833U1-SMSForwarder).
 
-[MIT](LICENSE), Copyright (c) 2026 ZerbLion. The license includes the upstream copyright notice and complete MIT terms under “Third-party notices.”
+[MIT](LICENSE), Copyright (c) 2026 ZerbLion. The upstream copyright notice and complete MIT terms are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

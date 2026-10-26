@@ -214,4 +214,4 @@ python3 -m unittest discover -s tests
 
 实现参考了 [czwstc/ZTE-MF833U1-SMSForwarder](https://github.com/czwstc/ZTE-MF833U1-SMSForwarder)。
 
-[MIT](LICENSE)，Copyright (c) 2026 ZerbLion。LICENSE 的 “Third-party notices” 保留了上游版权声明和完整 MIT 许可。
+[MIT](LICENSE)，Copyright (c) 2026 ZerbLion。上游版权声明和完整 MIT 许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
