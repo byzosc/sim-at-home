@@ -970,7 +970,12 @@ def concat_sms_is_complete(raw: Dict[str, Any]) -> bool:
     return complete_flag == "1" and received >= total
 
 
-def parse_messages(instance: Instance, payload: Dict[str, Any]) -> List[Message]:
+def parse_messages(
+    instance: Instance,
+    payload: Dict[str, Any],
+    *,
+    keep_sent: bool = False,
+) -> List[Message]:
     messages: List[Message] = []
     for item in payload.get("messages", []):
         if not isinstance(item, dict):
@@ -978,7 +983,7 @@ def parse_messages(instance: Instance, payload: Dict[str, Any]) -> List[Message]
         if not concat_sms_is_complete(item):
             continue
         message = message_from_dict(instance, item)
-        if message.direction == "sent" and not instance.include_sent:
+        if message.direction == "sent" and not (instance.include_sent or keep_sent):
             continue
         messages.append(message)
     return messages
@@ -1911,7 +1916,10 @@ def process_instance(
                         cellular_error = str(exc)
                         log(instance.label, f"关闭蜂窝数据失败：{exc}", error=True)
             payload = fetch_sms_payload(instance)
-            messages = parse_messages(instance, payload)
+            # Sent copies are stored too (without notifications): device cleanup
+            # only deletes what SQLite holds, so an unstored sent copy among the
+            # oldest batch blocks cleanup until the modem fills up (2026-11-02).
+            messages = parse_messages(instance, payload, keep_sent=True)
             page_count = len(payload.get("messages", []))
             page_limit = instance.device_sms_capacity
             if store.record_modem_page_status(
@@ -1955,6 +1963,7 @@ def process_instance(
             channels = notification_channels(instance)
             inserted_messages: List[Message] = []
             for message in reversed(messages):
+                notify = message.direction == "received" or instance.include_sent
                 result = store.store_message(
                     instance_id=instance.instance_id,
                     message_key=message.key,
@@ -1963,7 +1972,7 @@ def process_instance(
                     content=message.content,
                     message_date=message.date,
                     direction=message.direction,
-                    channels=channels,
+                    channels=channels if notify else (),
                 )
                 if result.inserted:
                     inserted_messages.append(message)

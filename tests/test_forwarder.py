@@ -992,6 +992,57 @@ device_cleanup_batch=30
                 self.assertEqual(count, 0)
 
     @patch("mf833u1_forwarder.fetch_sms_payload")
+    def test_sent_copy_is_stored_without_notification_and_cleanup_ready(self, fetch):
+        fetch.return_value = {
+            "messages": [
+                {
+                    "id": "11",
+                    "tag": "0",
+                    "number": "13800000000",
+                    "content": "received",
+                    "date": "26,10,10,00,00,00,+32",
+                },
+                {
+                    "id": "12",
+                    "tag": "2",
+                    "number": "+85200000000",
+                    "content": "sent test",
+                    "date": "26,10,10,00,08,45,+32",
+                },
+            ]
+        }
+        instance = self.instance(mode="bark", bark_key="test-key")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_root = Path(temp_dir)
+            with InboxStore(state_root / "inbox.sqlite3") as store:
+                store.set_instance_initialized("modem-1")
+
+            with patch("mf833u1_forwarder.deliver_channel") as deliver_channel:
+                ok = forwarder.process_instance(
+                    instance, state_root, dry_run=False, show_messages=False
+                )
+
+            self.assertTrue(ok)
+            self.assertEqual(deliver_channel.call_count, 1)
+            self.assertEqual(deliver_channel.call_args.args[2].modem_id, "11")
+            keys = [
+                forwarder.message_from_dict(instance, raw).key
+                for raw in fetch.return_value["messages"]
+            ]
+            with InboxStore(state_root / "inbox.sqlite3") as store:
+                rows = store.connection.execute(
+                    "SELECT direction, (SELECT COUNT(*) FROM notifications n "
+                    "WHERE n.message_seq = m.seq) AS jobs FROM messages m ORDER BY modem_id"
+                ).fetchall()
+                self.assertEqual(
+                    [(row["direction"], row["jobs"]) for row in rows],
+                    [("received", 1), ("sent", 0)],
+                )
+                self.assertTrue(
+                    store.messages_ready_for_device_cleanup("modem-1", keys)
+                )
+
+    @patch("mf833u1_forwarder.fetch_sms_payload")
     def test_message_is_committed_before_notification_attempt(self, fetch):
         fetch.return_value = {
             "messages": [
