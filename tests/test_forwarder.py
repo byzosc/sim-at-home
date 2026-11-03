@@ -697,10 +697,59 @@ device_cleanup_batch=30
             1,
         )
 
+    @patch("mf833u1_forwarder.time.sleep")
+    @patch("mf833u1_forwarder.fetch_sms_payload")
+    @patch("mf833u1_forwarder._fetch_modem_json", return_value={})
+    def test_delete_wait_tolerates_a_transient_partial_list(
+        self, _status, fetch, _sleep
+    ):
+        instance = self.instance()
+        before = self._device_payload(3)
+        selected = forwarder.message_from_dict(instance, before["messages"][2])
+        kept = [
+            forwarder.message_from_dict(instance, raw)
+            for raw in before["messages"][:2]
+        ]
+        fetch.side_effect = [
+            {"messages": [before["messages"][0]]},
+            {"messages": before["messages"][:2]},
+        ]
+        self.assertEqual(
+            forwarder._wait_for_device_deletion(
+                instance,
+                {selected.key},
+                {message.key for message in kept},
+            ),
+            2,
+        )
+
+    @patch("mf833u1_forwarder.time.sleep")
+    @patch("mf833u1_forwarder.time.monotonic", side_effect=[0, 0, 31])
+    @patch("mf833u1_forwarder.fetch_sms_payload")
+    @patch("mf833u1_forwarder._fetch_modem_json", return_value={})
+    def test_delete_wait_fails_if_retained_records_stay_missing(
+        self, _status, fetch, _monotonic, _sleep
+    ):
+        instance = self.instance()
+        before = self._device_payload(3)
+        selected = forwarder.message_from_dict(instance, before["messages"][2])
+        kept = [
+            forwarder.message_from_dict(instance, raw)
+            for raw in before["messages"][:2]
+        ]
+        fetch.return_value = {"messages": [before["messages"][0]]}
+        with self.assertRaisesRegex(forwarder.ForwarderError, "retained messages changed"):
+            forwarder._wait_for_device_deletion(
+                instance,
+                {selected.key},
+                {message.key for message in kept},
+            )
+
+    @patch("mf833u1_forwarder.record_instance_health")
     @patch("mf833u1_forwarder.cleanup_modem_messages")
     @patch("mf833u1_forwarder.process_instance", return_value=True)
     def test_enabled_cleanup_requires_readonly_snapshot(
-        self, _process, cleanup
+        self, _process, cleanup, _health
     ):
         instance = self.instance(device_cleanup_threshold=90)
         self.assertFalse(
@@ -1437,6 +1486,61 @@ class HealthAlertTests(unittest.TestCase):
             )
             alert.assert_not_called()
             self.assertTrue(self.health_path(state_root).exists())
+
+    @patch("mf833u1_forwarder.send_operational_alert")
+    def test_cleanup_failure_alerts_separately_from_forwarding(self, alert):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_root = Path(temp_dir)
+            start = datetime(2026, 11, 2, 12, 0, 0)
+            for minutes in (0, 15, 30):
+                forwarder.record_instance_health(
+                    self.instance(),
+                    state_root,
+                    ok=True,
+                    now=start + timedelta(minutes=minutes),
+                )
+                forwarder.record_instance_health(
+                    self.instance(),
+                    state_root,
+                    ok=False,
+                    error="device SMS cleanup refused",
+                    now=start + timedelta(minutes=minutes),
+                    kind="cleanup",
+                )
+            self.assertEqual(alert.call_count, 1)
+            self.assertIn("清理失败", alert.call_args[0][1])
+            self.assertIn("device SMS cleanup refused", alert.call_args[0][2])
+            self.assertTrue((state_root / "health" / "modem-1-cleanup.json").exists())
+            self.assertFalse(self.health_path(state_root).exists())
+
+    @patch("mf833u1_forwarder.record_instance_health")
+    @patch(
+        "mf833u1_forwarder.cleanup_modem_messages",
+        side_effect=forwarder.ForwarderError("device SMS cleanup refused: x"),
+    )
+    @patch("mf833u1_forwarder.process_instance", return_value=True)
+    def test_run_cycle_reports_cleanup_failure_to_health(
+        self, _process, _cleanup, health
+    ):
+        instance = self.instance(device_cleanup_threshold=90)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_root = Path(temp_dir)
+            (state_root / "view").mkdir()
+            ok = forwarder.run_cycle(
+                [instance],
+                state_root,
+                dry_run=False,
+                show_messages=False,
+                inbox_snapshot=state_root / "view" / "inbox.sqlite3",
+            )
+        self.assertFalse(ok)
+        cleanup_calls = [
+            call for call in health.call_args_list
+            if call.kwargs.get("kind") == "cleanup"
+        ]
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertFalse(cleanup_calls[0].kwargs["ok"])
+        self.assertIn("cleanup refused", cleanup_calls[0].kwargs["error"])
 
     @patch("mf833u1_forwarder.send_operational_alert")
     def test_sustained_failure_alerts_once_then_repeats_on_schedule(self, alert):

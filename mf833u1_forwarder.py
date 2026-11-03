@@ -1039,6 +1039,7 @@ def _wait_for_device_deletion(
     """Wait for exact post-conditions; command status alone is not sufficient."""
 
     deadline = time.monotonic() + timeout_seconds
+    retained_missing: Set[str] = set()
     while time.monotonic() < deadline:
         status = _fetch_modem_json(
             instance,
@@ -1051,14 +1052,18 @@ def _wait_for_device_deletion(
         payload = fetch_sms_payload(instance)
         current_messages = _device_messages_by_id(instance, payload)
         current_keys = {message.key for message in current_messages.values()}
+        # This firmware leaves the command status empty, so a list read while
+        # the deletion is still running can miss retained records (2026-11-03:
+        # one such read raised, the final state was exact). Keep polling and
+        # only fail if retained records are still missing at the deadline.
         retained_missing = retained_keys - current_keys
-        if retained_missing:
-            raise ForwarderError(
-                "device deletion verification failed because retained messages changed"
-            )
-        if not (selected_keys & current_keys):
+        if not retained_missing and not (selected_keys & current_keys):
             return len(current_messages)
         time.sleep(1)
+    if retained_missing:
+        raise ForwarderError(
+            "device deletion verification failed because retained messages changed"
+        )
     raise ForwarderError(
         "device accepted SMS deletion but exact removal was not confirmed in time"
     )
@@ -1345,8 +1350,26 @@ def send_operational_alert(instance: Instance, title: str, body: str) -> None:
     raise ForwarderError("no IP-based channel available for operational alerts")
 
 
-def _health_state_path(state_root: Path, instance_id: str) -> Path:
-    return state_root / "health" / f"{instance_id}.json"
+def _health_state_path(state_root: Path, instance_id: str, kind: str = "forward") -> Path:
+    suffix = "" if kind == "forward" else f"-{kind}"
+    return state_root / "health" / f"{instance_id}{suffix}.json"
+
+
+HEALTH_ALERT_TEXT = {
+    "forward": (
+        "短信转发已中断",
+        "转发器已连续失败 {minutes} 分钟，期间的短信可能收不到。",
+        "短信转发已恢复",
+        "转发器重新正常工作{outage}。",
+    ),
+    # 2026-11-02：清理被拒只写 syslog，4G 棒存满后新短信进不来，没有任何提醒。
+    "cleanup": (
+        "4G 棒短信清理失败",
+        "设备短信自动清理已连续失败 {minutes} 分钟；棒子存满后新短信会收不到。",
+        "4G 棒短信清理已恢复",
+        "设备短信自动清理重新正常工作{outage}。",
+    ),
+}
 
 
 def _load_health_state(path: Path) -> Optional[Dict[str, Any]]:
@@ -1377,6 +1400,7 @@ def record_instance_health(
     now: Optional[datetime] = None,
     alert_after: int = HEALTH_ALERT_AFTER_SECONDS,
     alert_repeat: int = HEALTH_ALERT_REPEAT_SECONDS,
+    kind: str = "forward",
 ) -> None:
     """跟踪单个实例的连续失败，并在超过阈值时主动告警。
 
@@ -1384,9 +1408,10 @@ def record_instance_health(
     以便及时发现短信转发中断。
     日志不是告警，这个函数负责把故障推到人的手机上。
     """
-    path = _health_state_path(state_root, instance.instance_id)
+    path = _health_state_path(state_root, instance.instance_id, kind)
     state = _load_health_state(path)
     moment = now or datetime.now()
+    down_title, down_body, up_title, up_body = HEALTH_ALERT_TEXT[kind]
 
     if ok:
         if state is not None:
@@ -1399,8 +1424,8 @@ def record_instance_health(
                 try:
                     send_operational_alert(
                         instance,
-                        f"[{instance.label}] 短信转发已恢复",
-                        f"转发器重新正常工作{outage}。",
+                        f"[{instance.label}] {up_title}",
+                        up_body.format(outage=outage),
                     )
                 except ForwarderError as exc:
                     log(instance.label, f"恢复告警发送失败: {exc}", error=True)
@@ -1427,9 +1452,9 @@ def record_instance_health(
         try:
             send_operational_alert(
                 instance,
-                f"[{instance.label}] 短信转发已中断",
-                f"转发器已连续失败 {minutes} 分钟，期间的短信可能收不到。\n"
-                f"最后一次错误：{error or '未知'}",
+                f"[{instance.label}] {down_title}",
+                down_body.format(minutes=minutes)
+                + f"\n最后一次错误：{error or '未知'}",
             )
         except ForwarderError as exc:
             log(instance.label, f"故障告警发送失败: {exc}", error=True)
@@ -2071,19 +2096,31 @@ def run_cycle(
             error=True,
         )
 
-    if snapshot_ready and inbox_snapshot is not None:
+    if not dry_run:
         for instance in cleanup_candidates:
             if instance.device_cleanup_threshold == 0:
                 continue
-            try:
-                cleanup_modem_messages(
-                    instance,
-                    state_root,
-                    inbox_snapshot,
-                )
-            except ForwarderError as exc:
-                successful = False
-                log(instance.label, str(exc), error=True)
+            cleanup_error = ""
+            if snapshot_ready and inbox_snapshot is not None:
+                try:
+                    cleanup_modem_messages(
+                        instance,
+                        state_root,
+                        inbox_snapshot,
+                    )
+                except ForwarderError as exc:
+                    successful = False
+                    cleanup_error = str(exc)
+                    log(instance.label, cleanup_error, error=True)
+            else:
+                cleanup_error = "只读短信快照不可用，本轮跳过设备短信清理"
+            record_instance_health(
+                instance,
+                state_root,
+                ok=not cleanup_error,
+                error=cleanup_error,
+                kind="cleanup",
+            )
     return successful
 
 
