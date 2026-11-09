@@ -1,5 +1,6 @@
 import json
 import os
+import io
 import tempfile
 import threading
 import unittest
@@ -526,6 +527,70 @@ device_cleanup_batch=30
 
             self.assertEqual(status["modem_main_state"], "modem_waitpuk")
             self.assertTrue(guard.exists())
+
+    @patch("mf833u1_forwarder.time.sleep")
+    @patch("mf833u1_forwarder._fetch_modem_json", return_value={"sms_cmd_status_result": "3"})
+    @patch("mf833u1_forwarder._post_modem_form", return_value={"result": "success"})
+    @patch("mf833u1_forwarder.fetch_sms_payload")
+    def test_send_sms_posts_ucs2_and_waits_for_sent_copy(self, fetch, post, _status, _sleep):
+        old = {"id": "1", "tag": "0", "number": "13800000000", "content": "hi",
+               "date": "26,11,09,15,00,00,+32"}
+        sent = {"id": "2", "tag": "2", "number": "95516", "content": "同意24",
+                "date": "26,11,09,15,01,48,+32"}
+        fetch.side_effect = [{"messages": [old]}, {"messages": [old]}, {"messages": [old, sent]}]
+        message = forwarder.send_sms(self.instance(), "95516", "同意24")
+        self.assertEqual(message.modem_id, "2")
+        fields = post.call_args.args[1]
+        self.assertEqual(fields["goformId"], "SEND_SMS")
+        self.assertEqual(fields["Number"], "95516")
+        self.assertEqual(fields["MessageBody"], "540C610F00320034")
+        self.assertEqual(fields["encode_type"], "UNICODE")
+
+    @patch("mf833u1_forwarder._post_modem_form")
+    @patch("mf833u1_forwarder.fetch_sms_payload", return_value={"messages": []})
+    def test_send_sms_rejects_bad_input_without_posting(self, _fetch, post):
+        for number, text in (
+            ("955 16", "同意24"),
+            ("95516;1", "同意24"),
+            ("95516", ""),
+            ("95516", "字" * 71),
+            ("95516", "好\U0001F600"),
+        ):
+            with self.assertRaises(forwarder.ForwarderError):
+                forwarder.send_sms(self.instance(), number, text)
+        post.assert_not_called()
+
+    @patch("mf833u1_forwarder.time.sleep")
+    @patch("mf833u1_forwarder._fetch_modem_json", return_value={"sms_cmd_status_result": "2"})
+    @patch("mf833u1_forwarder._post_modem_form", return_value={"result": "success"})
+    @patch("mf833u1_forwarder.fetch_sms_payload", return_value={"messages": []})
+    def test_send_sms_reports_modem_failure(self, _fetch, _post, _status, _sleep):
+        with self.assertRaisesRegex(forwarder.ForwarderError, "发送失败"):
+            forwarder.send_sms(self.instance(), "95516", "同意24")
+
+    @patch("mf833u1_forwarder.send_sms")
+    def test_send_cli_requires_instance_and_reads_stdin(self, send):
+        self.assertEqual(forwarder.main(["--send-to", "95516"]), 2)
+        send.assert_not_called()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir)
+            (config_dir / "modem-1.conf").write_text(
+                "[device]\nid=modem-1\nlabel=测试卡\nbase_url=http://192.168.0.1\n"
+                "interface=eth2\nexpected_mac=00:00:00:00:00:00\n"
+                "[notifications]\nmode=none\n",
+                encoding="utf-8",
+            )
+            send.return_value = forwarder.Message(
+                key="sha256:x", modem_id="2", number="95516", content="同意24",
+                date="2026-11-09 15:01:48", direction="sent",
+            )
+            with patch("sys.stdin", io.StringIO("同意24\n")):
+                code = forwarder.main(
+                    ["--config-dir", str(config_dir), "--instance", "modem-1",
+                     "--send-to", "95516"]
+                )
+        self.assertEqual(code, 0)
+        self.assertEqual(send.call_args.args[1:], ("95516", "同意24"))
 
     def test_sent_messages_are_filtered_by_default(self):
         payload = {

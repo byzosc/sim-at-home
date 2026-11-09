@@ -2147,6 +2147,68 @@ def run_migrations(
     return successful
 
 
+# 一条 UCS-2 短信的长度；更长的要拆成长短信，本固件没测过，先不放开。
+SEND_SMS_MAX_CHARS = 70
+
+
+def send_sms(
+    instance: Instance,
+    number: str,
+    text: str,
+    *,
+    timeout_seconds: int = 30,
+) -> Message:
+    """用这根棒子发一条短信，确认棒子里出现了这条发件才算发出。
+
+    2026-11-09 用户要求能用 158 发短信（「我直接告诉你内容你发行不行」）。
+    发件会被转发器下一轮当作 sent 入库（不推送），不会挡住设备清理。
+    """
+    number = number.strip()
+    if not re.fullmatch(r"\+?[0-9]{3,20}", number):
+        raise ForwarderError("收件号码只能是 3-20 位数字，可带 +")
+    if not text.strip():
+        raise ForwarderError("短信内容是空的")
+    if len(text) > SEND_SMS_MAX_CHARS:
+        raise ForwarderError(f"短信内容超过 {SEND_SMS_MAX_CHARS} 字，长短信没测过，拒绝发送")
+    if any(ord(char) > 0xFFFF for char in text):
+        raise ForwarderError("短信内容含表情等 UCS-2 以外的字符，拒绝发送")
+
+    before = set(_device_messages_by_id(instance, fetch_sms_payload(instance)))
+    response = _post_modem_form(
+        instance,
+        {
+            "isTest": "false",
+            "goformId": "SEND_SMS",
+            "notCallback": "true",
+            "Number": number,
+            "sms_time": datetime.now().strftime("%y;%m;%d;%H;%M;%S;+8"),
+            "MessageBody": text.encode("utf-16-be").hex().upper(),
+            "ID": "-1",
+            "encode_type": "UNICODE",
+        },
+    )
+    if response.get("result") != "success":
+        raise ForwarderError("棒子拒绝了发送请求")
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        status = _fetch_modem_json(instance, build_sms_command_status_url(instance, 4))
+        if str(status.get("sms_cmd_status_result", "")).strip() == "2":
+            raise ForwarderError("棒子报告短信发送失败")
+        current = _device_messages_by_id(instance, fetch_sms_payload(instance))
+        for modem_id, message in current.items():
+            if (
+                modem_id not in before
+                and message.direction == "sent"
+                and message.number == number
+                and message.content == text
+            ):
+                log(instance.label, f"已发短信给 {number}（{len(text)} 字）")
+                return message
+    raise ForwarderError(f"棒子接受了发送请求，但 {timeout_seconds} 秒内没看到这条发件")
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2197,6 +2259,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="在控制台显示短信正文（默认隐藏）",
     )
+    parser.add_argument(
+        "--send-to",
+        metavar="NUMBER",
+        help="用 --instance 指定的棒子发一条短信给 NUMBER；内容从标准输入读，不放在命令行里",
+    )
     return parser.parse_args(argv)
 
 
@@ -2214,11 +2281,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.send_to is not None and (
+        not args.instance or args.migrate_only or args.dry_run or args.once
+    ):
+        print("--send-to 必须配 --instance，且不能与其他模式同时使用", file=sys.stderr)
+        return 2
     try:
         instances = discover_instances(args.config_dir, args.instance)
     except ForwarderError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+
+    if args.send_to is not None:
+        if len(instances) != 1:
+            print("--instance 必须正好对应一根棒子", file=sys.stderr)
+            return 2
+        text = sys.stdin.read().rstrip("\r\n")
+        try:
+            message = send_sms(instances[0], args.send_to, text)
+        except ForwarderError as exc:
+            print(f"发送失败：{exc}", file=sys.stderr)
+            return 1
+        print(f"已发出：{instances[0].label} → {message.number}，{message.date}")
+        return 0
 
     if args.migrate_only:
         return (

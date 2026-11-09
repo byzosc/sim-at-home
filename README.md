@@ -196,7 +196,7 @@ Keep the backend on `127.0.0.1`. Do not expose it directly to LAN or the interne
 
 ## Limitations
 
-- **Cannot send SMS.** The modem hardware can send messages; this software does not implement it.
+- **Sending is command-line only and one segment long.** `printf '%s' '<text>' | python3 /usr/libexec/sim-card-forwarding/mf833u1_forwarder.py --instance <id> --send-to <number>` sends up to 70 characters (no emoji); the text is read from stdin and counts as sent once the sent copy appears on the modem. There is no web form.
 - Only the single MF833U1 setup above has been tested.
 - Notification acceptance is not a phone delivery receipt; duplicates are possible during retries.
 - PIN auto-unlock requires correct device identity and a confirmed PIN; rejected or uncertain attempts are guarded.
